@@ -1,0 +1,78 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pos_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pos
+      POSTGRES_PASSWORD: pos_secret
+      POSTGRES_DB: pos_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/platform:/docker-entrypoint-initdb.d
+    command: >
+      postgres
+        -c max_connections=300
+        -c shared_buffers=256MB
+        -c effective_cache_size=1GB
+        -c maintenance_work_mem=64MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+        -c work_mem=4MB
+        -c min_wal_size=1GB
+        -c max_wal_size=4GB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pos"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pos_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --save ""
+        --appendonly no
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pos_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POS_APP_ENV: development
+      POS_APP_ADDR: :8080
+      POS_DB_PLATFORM_DSN: postgres://pos:pos_secret@postgres:5432/pos_platform?sslmode=disable
+      POS_DB_TENANT_DSN: postgres://pos:pos_secret@postgres:5432/pos_platform?sslmode=disable
+      POS_REDIS_ADDR: redis:6379
+      POS_JWT_ACCESS_SECRET: change_me_in_production_access
+      POS_JWT_REFRESH_SECRET: change_me_in_production_refresh
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
