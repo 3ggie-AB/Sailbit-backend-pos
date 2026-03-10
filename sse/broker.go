@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"bufio"
+    "strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/3ggie-AB/Sailbit-backend-pos/cache"
@@ -175,12 +177,11 @@ func (b *Broker) ServeHTTP(c *fiber.Ctx) error {
 }
 
 func extractTenantOutlet(channel string) (string, string) {
-	// channel format: pos:events:{tenant_id}:{outlet_id}
-	parts := splitN(channel, ":", 4)
-	if len(parts) < 4 {
-		return "", ""
-	}
-	return parts[2], parts[3]
+    parts := strings.SplitN(channel, ":", 4)
+    if len(parts) < 4 {
+        return "", ""
+    }
+    return parts[2], parts[3]
 }
 
 func splitN(s, sep string, n int) []string {

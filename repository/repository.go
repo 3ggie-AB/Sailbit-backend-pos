@@ -162,7 +162,7 @@ func (r *pgProductRepo) List(ctx context.Context, outletID uuid.UUID, f ProductF
 	}
 
 	page := max(1, f.Page)
-	perPage := max(10, min(100, f.PerPage))
+	perPage := max(10, clampMin(100, f.PerPage))
 	offset := (page - 1) * perPage
 
 	countQ := fmt.Sprintf(`SELECT COUNT(*) FROM products %s`, where)
@@ -381,7 +381,7 @@ func (r *pgOrderRepo) ListByOutlet(ctx context.Context, outletID uuid.UUID, f Or
 	}
 
 	page := max(1, f.Page)
-	perPage := max(10, min(100, f.PerPage))
+	perPage := max(10, clampMin(100, f.PerPage))
 	offset := (page - 1) * perPage
 
 	var total int64
@@ -481,15 +481,12 @@ func (r *pgStockRepo) AddMovement(ctx context.Context, m *StockMovement) error {
 }
 
 // Helpers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+func clampMin(v, minimum int) int {
+    if v < minimum { return minimum }
+    return v
 }
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+func clamp(v, lo, hi int) int {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
 }

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/3ggie-AB/Sailbit-backend-pos/repository"
 	"github.com/3ggie-AB/Sailbit-backend-pos/pkg/response"
 	"go.uber.org/zap"
+	"github.com/google/uuid"
 )
 
 // TenantResolver resolves the tenant from subdomain or X-Tenant-ID header,
