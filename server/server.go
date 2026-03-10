@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/compress"
@@ -22,45 +24,37 @@ import (
 )
 
 type Server struct {
-	app    *fiber.App
-	cfg    *config.Config
-	dbMgr  *database.Manager
-	rdb    *cache.Client
-	log    *zap.Logger
+	app   *fiber.App
+	cfg   *config.Config
+	dbMgr *database.Manager
+	rdb   *cache.Client
+	log   *zap.Logger
 }
 
 func New(cfg *config.Config, log *zap.Logger) (*Server, error) {
 	ctx := context.Background()
 
-	// ── Database ─────────────────────────────────────────────────────
 	dbMgr, err := database.NewManager(ctx, &cfg.DB)
 	if err != nil {
 		return nil, fmt.Errorf("database: %w", err)
 	}
 
-	// ── Redis ─────────────────────────────────────────────────────────
 	rdb, err := cache.New(&cfg.Redis)
 	if err != nil {
 		return nil, fmt.Errorf("redis: %w", err)
 	}
 
-	// ── SSE Broker ────────────────────────────────────────────────────
 	broker := sse.NewBroker(&cfg.SSE, rdb, log)
 
-	// ── Fiber app ─────────────────────────────────────────────────────
 	app := fiber.New(fiber.Config{
 		AppName:               "POS Backend v1.0",
-		ReadTimeout:           10,
-		WriteTimeout:          30,
-		IdleTimeout:           120,
-		Concurrency:           256 * 1024, // 256k concurrent connections
+		ReadTimeout:           10 * time.Second,
+		WriteTimeout:          30 * time.Second,
+		IdleTimeout:           120 * time.Second,
+		Concurrency:           256 * 1024,
 		DisableStartupMessage: cfg.App.Env == "production",
-
-		// Fast JSON encoder
-		JSONEncoder: json.Marshal,
-		JSONDecoder: json.Unmarshal,
-
-		// Custom error handler
+		JSONEncoder:           json.Marshal,
+		JSONDecoder:           json.Unmarshal,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
@@ -73,7 +67,6 @@ func New(cfg *config.Config, log *zap.Logger) (*Server, error) {
 		},
 	})
 
-	// ── Global Middleware ─────────────────────────────────────────────
 	app.Use(recover.New(recover.Config{EnableStackTrace: cfg.App.Env != "production"}))
 	app.Use(requestid.New())
 	app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
@@ -83,7 +76,6 @@ func New(cfg *config.Config, log *zap.Logger) (*Server, error) {
 		AllowMethods: "GET,POST,PUT,PATCH,DELETE,OPTIONS",
 	}))
 
-	// Request logger
 	app.Use(func(c *fiber.Ctx) error {
 		err := c.Next()
 		log.Info("request",
@@ -96,7 +88,7 @@ func New(cfg *config.Config, log *zap.Logger) (*Server, error) {
 		return err
 	})
 
-	// ── Platform repositories (shared DB) ─────────────────────────────
+	// ── Platform repositories ─────────────────────────────────────────
 	tenantRepo := repository.NewTenantRepository(dbMgr.Platform())
 
 	// ── Services ──────────────────────────────────────────────────────
@@ -109,42 +101,55 @@ func New(cfg *config.Config, log *zap.Logger) (*Server, error) {
 	// ── Middleware factories ───────────────────────────────────────────
 	tenantMW := middleware.TenantResolver(tenantRepo, rdb, log)
 	authMW := middleware.Auth(&cfg.JWT, rdb)
-	rateMW := middleware.RateLimit(rdb, 300, 60) // 300 req/min per IP
+	rateMW := middleware.RateLimit(rdb, 300, 60*time.Second)
 
 	// ── Routes ────────────────────────────────────────────────────────
 
-	// Health check — no tenant required
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "version": cfg.App.Version})
 	})
 
-	// All API routes require tenant resolution
 	api := app.Group("/api/v1", tenantMW, rateMW)
 
-	// Auth — public within tenant context
 	auth := api.Group("/auth")
 	auth.Post("/login", authHandler.Login)
 	auth.Post("/refresh", authHandler.Refresh)
 	auth.Post("/logout", authMW, authHandler.Logout)
 
-	// SSE stream — authenticated
 	api.Get("/events", authMW, sseHandler.Stream)
 
-	// Tenant-scoped routes — all require auth + tenant DB pool
-	protected := api.Group("/", authMW, tenantDBMiddleware(dbMgr, rdb, log, cfg, broker))
+	// Tenant-scoped routes — handler injected per request via middleware
+	tenantDBMW := tenantDBMiddleware(dbMgr, rdb, log, cfg, broker)
+	protected := api.Group("/", authMW, tenantDBMW)
 
-	// Products
-	protected.Get("/products", productHandlerFromCtx(c).List)
-	protected.Get("/products/barcode/:barcode", productHandlerFromCtx(c).GetByBarcode)
-	protected.Get("/products/:id", productHandlerFromCtx(c).Get)
-	protected.Post("/products", middleware.RequirePermission("products.create"), productHandlerFromCtx(c).Create)
+	protected.Get("/products", func(c *fiber.Ctx) error {
+		return productHandlerFromCtx(c).List(c)
+	})
+	protected.Get("/products/barcode/:barcode", func(c *fiber.Ctx) error {
+		return productHandlerFromCtx(c).GetByBarcode(c)
+	})
+	protected.Get("/products/:id", func(c *fiber.Ctx) error {
+		return productHandlerFromCtx(c).Get(c)
+	})
+	protected.Post("/products", middleware.RequirePermission("products.create"), func(c *fiber.Ctx) error {
+		return productHandlerFromCtx(c).Create(c)
+	})
 
-	// Orders
-	protected.Get("/orders", orderHandlerFromCtx(c).List)
-	protected.Post("/orders", orderHandlerFromCtx(c).Create)
-	protected.Get("/orders/:id", orderHandlerFromCtx(c).Get)
-	protected.Patch("/orders/:id/complete", orderHandlerFromCtx(c).Complete)
-	protected.Patch("/orders/:id/void", middleware.RequirePermission("orders.void"), orderHandlerFromCtx(c).Void)
+	protected.Get("/orders", func(c *fiber.Ctx) error {
+		return orderHandlerFromCtx(c).List(c)
+	})
+	protected.Post("/orders", func(c *fiber.Ctx) error {
+		return orderHandlerFromCtx(c).Create(c)
+	})
+	protected.Get("/orders/:id", func(c *fiber.Ctx) error {
+		return orderHandlerFromCtx(c).Get(c)
+	})
+	protected.Patch("/orders/:id/complete", func(c *fiber.Ctx) error {
+		return orderHandlerFromCtx(c).Complete(c)
+	})
+	protected.Patch("/orders/:id/void", middleware.RequirePermission("orders.void"), func(c *fiber.Ctx) error {
+		return orderHandlerFromCtx(c).Void(c)
+	})
 
 	return &Server{
 		app:   app,
@@ -156,7 +161,6 @@ func New(cfg *config.Config, log *zap.Logger) (*Server, error) {
 }
 
 // tenantDBMiddleware injects tenant-scoped repositories into context.
-// This is the key pattern: each request gets handlers wired to the right DB pool.
 func tenantDBMiddleware(
 	dbMgr *database.Manager,
 	rdb *cache.Client,
@@ -173,7 +177,6 @@ func tenantDBMiddleware(
 			return fiber.NewError(fiber.StatusInternalServerError, "database unavailable")
 		}
 
-		// Wire up tenant-scoped repos and handlers, inject into context
 		productRepo := repository.NewProductRepository(pool)
 		orderRepo := repository.NewOrderRepository(pool)
 		stockRepo := repository.NewStockRepository(pool)
@@ -204,6 +207,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return err
 	}
 	s.dbMgr.Close()
-	s.rdb.Close()
+	s.rdb.Close() //nolint:errcheck
 	return nil
 }

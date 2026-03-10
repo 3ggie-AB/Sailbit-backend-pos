@@ -8,28 +8,24 @@ import (
 	"time"
 
 	"github.com/3ggie-AB/Sailbit-backend-pos/config"
-	"github.com/3ggie-AB/Sailbit-backend-pos/server"
 	"github.com/3ggie-AB/Sailbit-backend-pos/pkg/logger"
+	"github.com/3ggie-AB/Sailbit-backend-pos/server"
 )
 
 func main() {
-	// Load config
 	cfg, err := config.Load()
 	if err != nil {
 		panic("failed to load config: " + err.Error())
 	}
 
-	// Init logger
 	log := logger.New(cfg.App.Env)
-	defer log.Sync()
+	defer log.Sync() //nolint:errcheck
 
-	// Boot server
 	srv, err := server.New(cfg, log)
 	if err != nil {
 		log.Fatal("failed to create server", logger.Err(err))
 	}
 
-	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
